@@ -7,8 +7,8 @@ This repository provisions the first seven phases of the CARLA proof of concept:
 3. Docker, NVIDIA Container Toolkit, and CARLA 0.10.0 in off-screen mode.
 4. A Python client query that prints the live server version, map, frame, and actor count.
 5. A persistent scene driver with 20 Traffic Manager vehicles on autopilot,
-   eight managed crosswalk pedestrians, and a configurable vehicle-mounted or
-   static RGB camera.
+   16 stock AI-controlled crosswalk pedestrians, and a configurable
+   vehicle-mounted or static RGB camera.
 6. A FastAPI browser viewer that JPEG-encodes live camera callbacks and serves an
    MJPEG stream from VM loopback port 8080.
 7. A persistent SSH tunnel from Mac loopback port 8080 to the VM's loopback-only
@@ -40,7 +40,8 @@ on `127.0.0.1:2000` and queries the current CARLA world.
 The Phase 5 verifier requires all of the following from the live simulation:
 
 - exactly 20 managed vehicles
-- exactly eight managed pedestrians moving within the selected crosswalk area
+- exactly 16 stock `controller.ai.walker` pedestrians, with at least one moving
+  inside the selected crosswalk observation area
 - one valid vehicle-mounted or static RGB camera
 - live vehicle movement under Traffic Manager
 - at least ten camera frames received
@@ -62,20 +63,24 @@ the other 19 vehicles retain normal signal compliance.
 ## Static crosswalk camera
 
 Town10 exposes 16 crosswalk polygons through `carla.Map.get_crosswalks()`. The
-default live view is an elevated fixed camera aimed at surveyed crosswalk **#8**:
+default live view on this branch is an elevated fixed camera aimed at surveyed
+crosswalk **#14**:
 
-- crosswalk center: `(-62.529, -63.480, 0.0)`
-- camera location: `(-80.066, -60.985, 9.6)`
-- camera rotation: pitch `-27.242°`, yaw `-8.098°`, roll `0°`
+- crosswalk center: `(-91.110, 18.221, 0.0)`
+- camera location: `(-113.041, 21.270, 12.0)`
+- camera rotation: pitch `-27.242°`, yaw `-7.917°`, roll `0°`
 - field of view: `70°`
-- crosswalk footprint: approximately `20.33 m × 2.50 m`
 
 The camera faces mostly perpendicular to the crossing so the stripes read as a
-horizontal keyboard. A small offset along the crossing introduces a subtle
-perspective taper rather than perfect symmetry. This location has no yellow box
-junction in the frame. The exact geometry and rendered surveys are stored under
-`artifacts/crosswalk-survey/` and `artifacts/crosswalk-view-survey-8/`. Recreate
-the map-wide survey on the VM with:
+horizontal keyboard with a slight perspective offset. The yellow box junction is
+left visible because this experiment prioritizes observing CARLA's default
+pedestrian navigation and traffic-light behavior.
+
+The navigation-mesh survey samples 30,000 pedestrian locations and ranks all 16
+Town10 crosswalks by coverage through their center and on both approaches.
+Crosswalk #14 ranked first. A separate live probe spawned four stock AI walkers
+on its approaches; all four reached the opposite side through the crosswalk
+center within 45 seconds. Run those checks inside the driver image with:
 
 ```bash
 sudo docker run --rm --network=host \
@@ -83,10 +88,17 @@ sudo docker run --rm --network=host \
   --volume="${HOME}/carla-poc/data:/data" \
   --entrypoint=python3 \
   carla-poc-driver:0.10.0 \
-  /app/survey_crosswalks.py
+  /app/survey_navmesh_crosswalks.py --output=/data/navmesh-crosswalks.json
+
+sudo docker run --rm --network=host \
+  --user="$(id -u):$(id -g)" \
+  --volume="${HOME}/carla-poc/data:/data" \
+  --entrypoint=python3 \
+  carla-poc-driver:0.10.0 \
+  /app/probe_ai_crosswalk.py --crosswalk-id=14 --walkers=4 --duration=45
 ```
 
-Render the keyboard-oriented variants for crosswalk #8 with:
+Render keyboard-oriented camera variants for crosswalk #14 with:
 
 ```bash
 sudo docker run --rm --network=host \
@@ -94,26 +106,23 @@ sudo docker run --rm --network=host \
   --volume="${HOME}/carla-poc/data:/data" \
   --entrypoint=python3 \
   carla-poc-driver:0.10.0 \
-  /app/survey_crosswalk_views.py --crosswalk-id=8
+  /app/survey_crosswalk_views.py --crosswalk-id=14
 ```
 
-The live scene places eight invincible pedestrians in parallel lanes across
-crosswalk #8. Because Town10's pedestrian navigation mesh does not span the
-middle of this crossing, a constrained controller gives CARLA's walking actors
-native direction and speed controls along the surveyed crosswalk axis. CARLA
-retains ownership of gait, gravity, ground contact, and collisions. Their routes extend six metres beyond
-both ends of the crosswalk, so pedestrians leave the camera frame before reversing
-direction. Opposing walkers are staggered across the full round trip so individual
-exits do not empty the camera view. A watchdog replaces invalid actors and returns
-lateral wanderers to the route; a walker obstructed near an off-camera endpoint
-reverses naturally instead of being teleported. Live, moving, and recovery counts
-are included in the scene telemetry; live and moving counts appear in the browser viewer.
+The live scene places 16 invincible pedestrian actors near the two approaches and
+attaches CARLA's stock `controller.ai.walker` to each one. The application only
+assigns an opposite-side navigation target and a natural walking speed of
+1.1–1.65 m/s. CARLA owns the route, traffic-light decisions, gait, gravity,
+ground contact, and collisions; the application does not steer or rewrite walker
+transforms. When an AI controller reaches its endpoint, it receives the opposite
+endpoint as its next destination. The world pedestrian crossing factor is set to
+`1.0` so every walker is permitted to cross roads. Live, moving, controller, and
+recovery counts are exposed to the verifier and browser telemetry.
 
-Pedestrians retain CARLA's default character-movement configuration throughout
-the route. The controller never rewrites a walker's transform during normal
-motion, leaving gait, gravity, ground contact, and collision response to CARLA.
-The native speed input is calibrated for the CARLA 0.10 UE5 runtime's measured
-movement scale so the observed speeds remain between 1.1 and 1.65 m/s.
+The earlier deterministic crosswalk #8 scene remains available by launching
+`simulation.py` with `--pedestrian-mode=manual --crosswalk-id=8` and its original
+camera coordinates. That mode is useful for repeatable keyboard-like motion;
+the default deployment on this branch is the stock-AI observation experiment.
 
 ## Camera performance profile
 

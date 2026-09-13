@@ -24,8 +24,9 @@ def parse_args() -> argparse.Namespace:
         choices=("static", "vehicle"),
         default="static",
     )
-    parser.add_argument("--expected-crosswalk-id", default=8, type=int)
-    parser.add_argument("--expected-pedestrians", default=8, type=int)
+    parser.add_argument("--expected-crosswalk-id", default=14, type=int)
+    parser.add_argument("--expected-pedestrians", default=16, type=int)
+    parser.add_argument("--expected-pedestrian-mode", default="ai")
     parser.add_argument(
         "--output", default="/data/viewer-verified-frame.jpg", type=Path
     )
@@ -152,6 +153,10 @@ def main() -> int:
         raise RuntimeError(
             f"Unexpected pedestrian count: {health_after.get('pedestrian_count')}"
         )
+    if health_after.get("pedestrian_mode") != args.expected_pedestrian_mode:
+        raise RuntimeError(
+            f"Unexpected pedestrian mode: {health_after.get('pedestrian_mode')}"
+        )
     if not health_after.get("moving_pedestrian_count", 0):
         raise RuntimeError("No managed pedestrians are moving")
 
@@ -185,6 +190,7 @@ def main() -> int:
         "mjpeg_content_type": content_type,
         "page": "CARLA on GCP",
         "pedestrian_count": health_after.get("pedestrian_count"),
+        "pedestrian_mode": health_after.get("pedestrian_mode"),
         "moving_pedestrian_count": health_after.get(
             "moving_pedestrian_count"
         ),

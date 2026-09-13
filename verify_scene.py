@@ -12,6 +12,8 @@ from typing import Any
 
 import carla
 
+from survey_navmesh_crosswalks import get_crosswalks
+
 
 ROLE_NAME = "carla-poc-phase5"
 CAMERA_ROLE_NAME = "carla-poc-phase5-camera"
@@ -28,14 +30,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", default=120.0, type=float)
     parser.add_argument("--expected-width", default=352, type=int)
     parser.add_argument("--expected-height", default=240, type=int)
-    parser.add_argument("--expected-crosswalk-id", default=8, type=int)
-    parser.add_argument("--expected-camera-x", default=-80.066, type=float)
-    parser.add_argument("--expected-camera-y", default=-60.985, type=float)
-    parser.add_argument("--expected-camera-z", default=9.6, type=float)
+    parser.add_argument("--expected-crosswalk-id", default=14, type=int)
+    parser.add_argument("--expected-camera-x", default=-113.041, type=float)
+    parser.add_argument("--expected-camera-y", default=21.270, type=float)
+    parser.add_argument("--expected-camera-z", default=12.0, type=float)
     parser.add_argument("--expected-camera-pitch", default=-27.242, type=float)
-    parser.add_argument("--expected-camera-yaw", default=-8.098, type=float)
+    parser.add_argument("--expected-camera-yaw", default=-7.917, type=float)
     parser.add_argument("--expected-camera-fov", default=70.0, type=float)
-    parser.add_argument("--expected-pedestrians", default=8, type=int)
+    parser.add_argument("--expected-pedestrians", default=16, type=int)
+    parser.add_argument("--expected-pedestrian-mode", default="ai")
     return parser.parse_args()
 
 
@@ -93,6 +96,18 @@ def main() -> int:
     client = carla.Client(args.host, args.port)
     client.set_timeout(15.0)
     world = client.get_world()
+    crosswalk = next(
+        (
+            candidate
+            for candidate in get_crosswalks(world)
+            if candidate.crosswalk_id == args.expected_crosswalk_id
+        ),
+        None,
+    )
+    if crosswalk is None:
+        raise RuntimeError(
+            f"Crosswalk {args.expected_crosswalk_id} is not available"
+        )
     deadline = time.time() + args.timeout
     last_observation: dict[str, Any] = {}
     previous_pedestrian_positions: dict[int, carla.Location] = {}
@@ -115,6 +130,7 @@ def main() -> int:
             for actor in actors.filter("walker.pedestrian.*")
             if actor.attributes.get("role_name") == WALKER_ROLE_NAME
         ]
+        walker_controllers = list(actors.filter("controller.ai.walker"))
         status = load_status(args.status)
         speeds = [speed(vehicle) for vehicle in vehicles]
         pedestrian_positions = {
@@ -148,11 +164,23 @@ def main() -> int:
             measured_moving_pedestrian_count,
             reported_moving_pedestrian_count,
         )
-        pedestrians_in_crosswalk_area = sum(
-            -66.0 <= pedestrian.get_location().x <= -59.0
-            and -77.0 <= pedestrian.get_location().y <= -50.0
-            for pedestrian in pedestrians
-        )
+        pedestrians_in_crosswalk_area = 0
+        for position in pedestrian_positions.values():
+            offset_x = position.x - crosswalk.center.x
+            offset_y = position.y - crosswalk.center.y
+            longitudinal = (
+                offset_x * crosswalk.long_axis.x
+                + offset_y * crosswalk.long_axis.y
+            )
+            lateral = abs(
+                -offset_x * crosswalk.long_axis.y
+                + offset_y * crosswalk.long_axis.x
+            )
+            if (
+                abs(longitudinal) <= crosswalk.length / 2 + 10.0
+                and lateral <= crosswalk.width / 2 + 10.0
+            ):
+                pedestrians_in_crosswalk_area += 1
         status_age = time.time() - status.get("updated_at_unix", 0)
         camera_frames = status.get("camera", {}).get("frame_count", 0)
         camera_fps = status.get("camera", {}).get("fps", 0.0)
@@ -210,6 +238,8 @@ def main() -> int:
                 max(pedestrian_speeds, default=0.0), 2
             ),
             "pedestrian_count": len(pedestrians),
+            "pedestrian_controller_count": len(walker_controllers),
+            "pedestrian_mode": status.get("pedestrian_mode"),
             "pedestrians_in_crosswalk_area": pedestrians_in_crosswalk_area,
             "status_age_seconds": round(status_age, 2),
             "vehicle_count": len(vehicles),
@@ -220,8 +250,10 @@ def main() -> int:
             and len(cameras) == 1
             and camera_mount_valid
             and len(pedestrians) == args.expected_pedestrians
+            and len(walker_controllers) == args.expected_pedestrians
+            and status.get("pedestrian_mode") == args.expected_pedestrian_mode
             and moving_pedestrian_count > 0
-            and pedestrians_in_crosswalk_area == args.expected_pedestrians
+            and pedestrians_in_crosswalk_area > 0
             and (
                 (camera_mode == "vehicle" and camera_vehicle_speed > 0.5)
                 or (camera_mode == "static" and moving_count > 0)

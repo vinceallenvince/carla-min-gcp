@@ -250,7 +250,7 @@
           document.querySelector("#pedestrians").textContent =
             health.pedestrian_count == null
               ? "—"
-              : `${health.moving_pedestrian_count} / ${health.pedestrian_count} moving`;
+              : `${health.moving_pedestrian_count} / ${health.pedestrian_count} moving · ${health.pedestrian_mode === "ai" ? "stock AI" : "manual"}`;
           document.querySelector("#speed").textContent =
             `${(health.ego_speed_mps ?? 0).toFixed(1)} m/s`;
         } catch (error) {
