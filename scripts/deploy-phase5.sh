@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_ID="${PROJECT_ID:-xwalk-keyboards-01}"
+ZONE="${ZONE:-us-east4-a}"
+VM_NAME="${VM_NAME:-carla-poc}"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+gcloud compute ssh "${VM_NAME}" \
+  --project="${PROJECT_ID}" \
+  --zone="${ZONE}" \
+  --command='mkdir -p "${HOME}/carla-poc/data"'
+
+gcloud compute scp \
+  --recurse \
+  "${REPO_DIR}/Dockerfile.driver" \
+  "${REPO_DIR}/requirements-viewer.txt" \
+  "${REPO_DIR}/simulation.py" \
+  "${REPO_DIR}/static" \
+  "${REPO_DIR}/survey_crosswalks.py" \
+  "${REPO_DIR}/survey_crosswalk_views.py" \
+  "${REPO_DIR}/verify_scene.py" \
+  "${REPO_DIR}/verify_viewer.py" \
+  "${VM_NAME}:carla-poc/" \
+  --project="${PROJECT_ID}" \
+  --zone="${ZONE}"
+
+gcloud compute ssh "${VM_NAME}" \
+  --project="${PROJECT_ID}" \
+  --zone="${ZONE}" \
+  --command='set -euo pipefail
+cd "${HOME}/carla-poc"
+sudo docker build --file Dockerfile.driver --tag carla-poc-driver:0.10.0 .
+if sudo docker inspect carla-scene >/dev/null 2>&1; then
+  sudo docker stop --time=20 carla-scene >/dev/null
+  sudo docker rm carla-scene >/dev/null
+fi
+sudo docker run --detach \
+  --name=carla-scene \
+  --restart=unless-stopped \
+  --network=host \
+  --user="$(id -u):$(id -g)" \
+  --env=HOME=/tmp \
+  --volume="${HOME}/carla-poc/data:/data" \
+  carla-poc-driver:0.10.0 \
+  --vehicles=20 \
+  --pedestrians=8 \
+  --http-host=127.0.0.1 \
+  --http-port=8080 \
+  --camera-width=352 \
+  --camera-height=240 \
+  --camera-fps=20 \
+  --camera-fov=70 \
+  --jpeg-quality=75 \
+  --camera-mode=static \
+  --crosswalk-id=8 \
+  --static-camera-x=-80.066 \
+  --static-camera-y=-60.985 \
+  --static-camera-z=9.6 \
+  --static-camera-pitch=-27.242 \
+  --static-camera-yaw=-8.098 \
+  --static-camera-roll=0.0 \
+  --output-dir=/data'

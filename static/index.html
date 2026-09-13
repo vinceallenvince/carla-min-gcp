@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CARLA on GCP</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        background: #08111b;
+        color: #edf7ff;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        background:
+          radial-gradient(circle at 20% 0%, #17334a 0, transparent 36rem),
+          #08111b;
+      }
+
+      main {
+        width: min(1180px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 32px 0 48px;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        margin-bottom: 18px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(1.4rem, 3vw, 2.25rem);
+        letter-spacing: -0.035em;
+      }
+
+      .eyebrow {
+        margin: 0 0 6px;
+        color: #70d6ff;
+        font-size: 0.76rem;
+        font-weight: 750;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: 9px;
+        min-width: max-content;
+        padding: 9px 13px;
+        border: 1px solid #29455a;
+        border-radius: 999px;
+        background: rgb(9 23 34 / 82%);
+        color: #a9bfd0;
+        font-size: 0.84rem;
+      }
+
+      .status-dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: #ffbd5b;
+        box-shadow: 0 0 14px currentColor;
+      }
+
+      .status.live .status-dot {
+        background: #58e6a9;
+      }
+
+      .viewer {
+        overflow: hidden;
+        border: 1px solid #28475d;
+        border-radius: 18px;
+        background: #02070b;
+        box-shadow: 0 28px 80px rgb(0 0 0 / 42%);
+      }
+
+      .viewer img {
+        display: block;
+        width: 100%;
+        aspect-ratio: 22 / 15;
+        object-fit: contain;
+        image-rendering: auto;
+      }
+
+      .metadata {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 1px;
+        border-top: 1px solid #28475d;
+        background: #28475d;
+      }
+
+      .metric {
+        min-width: 0;
+        padding: 14px 16px;
+        background: #0d1b26;
+      }
+
+      .metric-label {
+        display: block;
+        margin-bottom: 3px;
+        color: #7893a8;
+        font-size: 0.69rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .metric-value {
+        overflow: hidden;
+        color: #eaf7ff;
+        font-variant-numeric: tabular-nums;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      footer {
+        margin-top: 16px;
+        color: #6f899c;
+        font-size: 0.8rem;
+      }
+
+      @media (max-width: 720px) {
+        header {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        .metadata {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">Live simulation</p>
+          <h1>CARLA on GCP</h1>
+        </div>
+        <div class="status" id="status">
+          <span class="status-dot"></span>
+          <span id="status-text">Connecting…</span>
+        </div>
+      </header>
+
+      <section class="viewer" aria-label="Live CARLA camera">
+        <img id="stream" src="/stream.mjpg" alt="Live CARLA simulation" />
+        <div class="metadata">
+          <div class="metric">
+            <span class="metric-label">Map</span>
+            <span class="metric-value" id="map">—</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Delivered FPS</span>
+            <span class="metric-value" id="fps">—</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Resolution</span>
+            <span class="metric-value" id="resolution">—</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Camera</span>
+            <span class="metric-value" id="camera-mode">—</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">JPEG size</span>
+            <span class="metric-value" id="jpeg-size">—</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Camera frames</span>
+            <span class="metric-value" id="frames">—</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Dropped frames</span>
+            <span class="metric-value" id="dropped">—</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Vehicles</span>
+            <span class="metric-value" id="vehicles">—</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Pedestrians</span>
+            <span class="metric-value" id="pedestrians">—</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Ego speed</span>
+            <span class="metric-value" id="speed">—</span>
+          </div>
+        </div>
+      </section>
+
+      <footer>MJPEG over an SSH-protected loopback connection.</footer>
+    </main>
+
+    <script>
+      const status = document.querySelector("#status");
+      const statusText = document.querySelector("#status-text");
+      const stream = document.querySelector("#stream");
+      let reconnectTimer;
+
+      stream.addEventListener("error", () => {
+        status.classList.remove("live");
+        statusText.textContent = "Reconnecting stream…";
+        clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(() => {
+          stream.src = `/stream.mjpg?retry=${Date.now()}`;
+        }, 1000);
+      });
+
+      async function refreshHealth() {
+        try {
+          const response = await fetch("/healthz", { cache: "no-store" });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const health = await response.json();
+          status.classList.add("live");
+          statusText.textContent = `Live · ${health.camera_fps.toFixed(1)} fps`;
+          document.querySelector("#map").textContent = health.map ?? "—";
+          document.querySelector("#fps").textContent =
+            `${health.camera_fps.toFixed(1)} / ${health.camera_target_fps.toFixed(0)}`;
+          document.querySelector("#resolution").textContent =
+            `${health.camera_width} × ${health.camera_height}`;
+          document.querySelector("#camera-mode").textContent =
+            health.camera_mode === "static"
+              ? `Static · #${health.crosswalk_id} · ${Number(health.camera_fov ?? 0).toFixed(0)}°`
+              : "Vehicle mounted";
+          document.querySelector("#jpeg-size").textContent =
+            `${(health.camera_jpeg_bytes / 1024).toFixed(1)} KB`;
+          document.querySelector("#frames").textContent =
+            health.camera_frame_count.toLocaleString();
+          document.querySelector("#dropped").textContent =
+            health.camera_dropped_frame_count.toLocaleString();
+          document.querySelector("#vehicles").textContent =
+            health.vehicle_count ?? "—";
+          document.querySelector("#pedestrians").textContent =
+            health.pedestrian_count == null
+              ? "—"
+              : `${health.moving_pedestrian_count} / ${health.pedestrian_count} moving`;
+          document.querySelector("#speed").textContent =
+            `${(health.ego_speed_mps ?? 0).toFixed(1)} m/s`;
+        } catch (error) {
+          status.classList.remove("live");
+          statusText.textContent = "Reconnecting…";
+        }
+      }
+
+      refreshHealth();
+      setInterval(refreshHealth, 1000);
+    </script>
+  </body>
+</html>
