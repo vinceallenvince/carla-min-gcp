@@ -10,7 +10,7 @@ RUN apt-get update \
     && python3 -c "import carla; print('Installed CARLA client', carla.__version__ if hasattr(carla, '__version__') else '0.10.0')"
 
 WORKDIR /app
-COPY --chown=carla:carla simulation.py survey_crosswalks.py survey_crosswalk_views.py verify_scene.py verify_viewer.py /app/
+COPY --chown=carla:carla simulation.py survey_crosswalks.py survey_crosswalk_views.py survey_navmesh_crosswalks.py probe_ai_crosswalk.py verify_scene.py verify_viewer.py /app/
 COPY --chown=carla:carla static /app/static
 
 EXPOSE 8080

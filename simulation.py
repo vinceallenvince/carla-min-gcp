@@ -37,6 +37,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--traffic-manager-port", default=8000, type=int)
     parser.add_argument("--vehicles", default=20, type=int)
     parser.add_argument("--pedestrians", default=8, type=int)
+    parser.add_argument(
+        "--pedestrian-mode",
+        choices=("manual", "ai"),
+        default="manual",
+    )
     parser.add_argument("--seed", default=20260912, type=int)
     parser.add_argument("--output-dir", default="/data", type=Path)
     parser.add_argument("--http-host", default="127.0.0.1")
@@ -436,6 +441,83 @@ class CrosswalkWalker:
             return False
 
 
+class AIWalker:
+    """Observe CARLA's stock walker navigation between crosswalk approaches."""
+
+    def __init__(
+        self,
+        actor: carla.Walker,
+        controller: carla.WalkerAIController,
+        endpoint_a: carla.Location,
+        endpoint_b: carla.Location,
+        target_a: bool,
+        speed: float,
+    ) -> None:
+        self.actor = actor
+        self.controller = controller
+        self.endpoint_a = endpoint_a
+        self.endpoint_b = endpoint_b
+        self.target_a = target_a
+        self.speed = speed
+        self.turnaround_count = 0
+        self.last_location = self.actor.get_location()
+        self.last_update_at = time.monotonic()
+        self.last_moved_at = self.last_update_at
+        self.last_route_change_at = self.last_update_at
+        self.has_moved = False
+        self.observed_speed = 0.0
+
+    @property
+    def target(self) -> carla.Location:
+        return self.endpoint_a if self.target_a else self.endpoint_b
+
+    def update(self) -> None:
+        now = time.monotonic()
+        location = self.actor.get_location()
+        elapsed = min(max(now - self.last_update_at, 0.001), 0.2)
+        displacement = math.hypot(
+            location.x - self.last_location.x,
+            location.y - self.last_location.y,
+        )
+        self.observed_speed = displacement / elapsed
+        if displacement >= 0.03:
+            self.last_moved_at = now
+            self.has_moved = True
+        self.last_location = location
+        self.last_update_at = now
+
+        if (
+            location.distance(self.target) <= 2.0
+            and now - self.last_route_change_at >= 2.0
+        ):
+            self.target_a = not self.target_a
+            self.controller.go_to_location(self.target)
+            self.turnaround_count += 1
+            self.last_route_change_at = now
+
+    def destroy(self) -> None:
+        try:
+            self.controller.stop()
+        except RuntimeError:
+            pass
+        for actor in (self.controller, self.actor):
+            try:
+                actor.destroy()
+            except RuntimeError:
+                pass
+
+    def is_valid(self, world: carla.World) -> bool:
+        try:
+            return (
+                self.actor.is_alive
+                and self.controller.is_alive
+                and world.get_actor(self.actor.id) is not None
+                and world.get_actor(self.controller.id) is not None
+            )
+        except RuntimeError:
+            return False
+
+
 def spawn_crosswalk_walkers(
     world: carla.World,
     count: int,
@@ -551,23 +633,184 @@ def spawn_crosswalk_walkers(
     return walkers
 
 
-def maintain_crosswalk_walkers(
+def sample_crosswalk_approaches(
     world: carla.World,
-    walkers: list[CrosswalkWalker],
-    target_count: int,
     crosswalk_id: int,
-    rng: random.Random,
-) -> tuple[list[CrosswalkWalker], bool]:
+    sample_count: int = 30000,
+) -> tuple[list[carla.Location], list[carla.Location]]:
     center, length, width, long_axis, side_axis = crosswalk_axes(
         world, crosswalk_id
     )
-    maintained: list[CrosswalkWalker] = []
+    half_length = length / 2
+    side_a: list[carla.Location] = []
+    side_b: list[carla.Location] = []
+    for _ in range(sample_count):
+        location = world.get_random_location_from_navigation()
+        if location is None:
+            continue
+        offset_x = location.x - center.x
+        offset_y = location.y - center.y
+        longitudinal = offset_x * long_axis.x + offset_y * long_axis.y
+        lateral = offset_x * side_axis.x + offset_y * side_axis.y
+        approach_distance = abs(longitudinal) - half_length
+        if abs(lateral) > width / 2 + 4.0:
+            continue
+        if not 0.5 <= approach_distance <= 8.0:
+            continue
+        (side_a if longitudinal > 0 else side_b).append(location)
+
+    def rank(location: carla.Location) -> tuple[float, float]:
+        offset_x = location.x - center.x
+        offset_y = location.y - center.y
+        longitudinal = offset_x * long_axis.x + offset_y * long_axis.y
+        lateral = offset_x * side_axis.x + offset_y * side_axis.y
+        return abs(lateral), abs(abs(longitudinal) - half_length - 2.0)
+
+    side_a.sort(key=rank)
+    side_b.sort(key=rank)
+    return side_a, side_b
+
+
+def select_separated_locations(
+    candidates: list[carla.Location],
+    count: int,
+) -> list[carla.Location]:
+    selected: list[carla.Location] = []
+    for candidate in candidates:
+        if all(candidate.distance(existing) >= 0.9 for existing in selected):
+            selected.append(candidate)
+        if len(selected) == count:
+            break
+    return selected
+
+
+def spawn_ai_crosswalk_walkers(
+    world: carla.World,
+    count: int,
+    crosswalk_id: int,
+    rng: random.Random,
+) -> list[AIWalker]:
+    if count == 0:
+        return []
+
+    side_a, side_b = sample_crosswalk_approaches(world, crosswalk_id)
+    per_side = math.ceil(count / 2)
+    endpoints_a = select_separated_locations(side_a, per_side)
+    endpoints_b = select_separated_locations(side_b, per_side)
+    if min(len(endpoints_a), len(endpoints_b)) < per_side:
+        raise RuntimeError(
+            f"Crosswalk {crosswalk_id} has insufficient navigation-mesh approaches: "
+            f"side_a={len(endpoints_a)}, side_b={len(endpoints_b)}"
+        )
+
+    world.set_pedestrians_cross_factor(1.0)
+    walker_blueprints = list(
+        world.get_blueprint_library().filter("walker.pedestrian.*")
+    )
+    controller_blueprint = world.get_blueprint_library().find(
+        "controller.ai.walker"
+    )
+    walkers: list[AIWalker] = []
+    occupied_starts: list[carla.Location] = []
+    try:
+        for index in range(count):
+            start_on_a = index % 2 == 0
+            slot = index // 2
+            start_candidates = side_a if start_on_a else side_b
+            endpoint_a = endpoints_a[slot]
+            endpoint_b = endpoints_b[slot]
+            blueprint = rng.choice(walker_blueprints)
+            blueprint.set_attribute("role_name", WALKER_ROLE_NAME)
+            if blueprint.has_attribute("is_invincible"):
+                blueprint.set_attribute("is_invincible", "true")
+
+            actor: carla.Walker | None = None
+            for candidate in start_candidates[:200]:
+                if any(
+                    candidate.distance(existing) < 0.9
+                    for existing in occupied_starts
+                ):
+                    continue
+                start = carla.Location(
+                    x=candidate.x,
+                    y=candidate.y,
+                    z=candidate.z + 0.5,
+                )
+                actor = world.try_spawn_actor(blueprint, carla.Transform(start))
+                if actor is not None:
+                    occupied_starts.append(candidate)
+                    break
+            if actor is None:
+                raise RuntimeError(
+                    f"Could not spawn AI pedestrian {index + 1}/{count} "
+                    f"near crosswalk {crosswalk_id}"
+                )
+
+            try:
+                controller = world.spawn_actor(
+                    controller_blueprint,
+                    carla.Transform(),
+                    attach_to=actor,
+                )
+            except Exception:
+                actor.destroy()
+                raise
+            speed = rng.uniform(1.1, 1.65)
+            target_a = not start_on_a
+            walker = AIWalker(
+                actor,
+                controller,
+                endpoint_a,
+                endpoint_b,
+                target_a,
+                speed,
+            )
+            walkers.append(walker)
+            controller.start()
+            controller.set_max_speed(speed)
+            controller.go_to_location(walker.target)
+    except Exception:
+        for walker in walkers:
+            walker.destroy()
+        raise
+
+    return walkers
+
+
+def spawn_managed_walkers(
+    world: carla.World,
+    count: int,
+    crosswalk_id: int,
+    rng: random.Random,
+    pedestrian_mode: str,
+) -> list[CrosswalkWalker | AIWalker]:
+    if pedestrian_mode == "ai":
+        return spawn_ai_crosswalk_walkers(world, count, crosswalk_id, rng)
+    return spawn_crosswalk_walkers(world, count, crosswalk_id, rng)
+
+
+def maintain_crosswalk_walkers(
+    world: carla.World,
+    walkers: list[CrosswalkWalker | AIWalker],
+    target_count: int,
+    crosswalk_id: int,
+    rng: random.Random,
+    pedestrian_mode: str,
+) -> tuple[list[CrosswalkWalker | AIWalker], bool]:
+    center, length, width, long_axis, side_axis = crosswalk_axes(
+        world, crosswalk_id
+    )
+    maintained: list[CrosswalkWalker | AIWalker] = []
     recovered = False
     for walker in walkers:
         if not walker.is_valid(world):
+            walker.destroy()
             recovered = True
             continue
         try:
+            if isinstance(walker, AIWalker):
+                maintained.append(walker)
+                continue
             location = walker.actor.get_location()
             offset_x = location.x - center.x
             offset_y = location.y - center.y
@@ -596,10 +839,19 @@ def maintain_crosswalk_walkers(
     maintained = maintained[:target_count]
     missing = target_count - len(maintained)
     if missing > 0:
-        print(f"Replacing {missing} invalid pedestrian(s)", flush=True)
+        print(
+            f"Replacing {missing} invalid {pedestrian_mode} pedestrian(s)",
+            flush=True,
+        )
         try:
             maintained.extend(
-                spawn_crosswalk_walkers(world, missing, crosswalk_id, rng)
+                spawn_managed_walkers(
+                    world,
+                    missing,
+                    crosswalk_id,
+                    rng,
+                    pedestrian_mode,
+                )
             )
         except RuntimeError as exc:
             print(f"Pedestrian replacement deferred: {exc}", flush=True)
@@ -610,7 +862,9 @@ def maintain_crosswalk_walkers(
     return maintained, recovered
 
 
-def pedestrian_status(walkers: list[CrosswalkWalker]) -> dict[str, Any]:
+def pedestrian_status(
+    walkers: list[CrosswalkWalker | AIWalker],
+) -> dict[str, Any]:
     moving = 0
     samples = []
     now = time.monotonic()
@@ -841,6 +1095,7 @@ def create_viewer_app(recorder: CameraRecorder, status_path: Path) -> FastAPI:
                     "moving_pedestrian_count"
                 ),
                 "pedestrian_count": scene_status.get("pedestrian_count"),
+                "pedestrian_mode": scene_status.get("pedestrian_mode"),
                 "state": scene_status.get("state", "starting"),
                 "vehicle_count": scene_status.get("vehicle_count"),
             },
@@ -1019,7 +1274,7 @@ def main() -> int:
 
     rng = random.Random(args.seed)
     vehicles: list[carla.Vehicle] = []
-    walkers: list[CrosswalkWalker] = []
+    walkers: list[CrosswalkWalker | AIWalker] = []
     camera: carla.Sensor | None = None
     viewer_server: uvicorn.Server | None = None
     viewer_thread: threading.Thread | None = None
@@ -1032,8 +1287,12 @@ def main() -> int:
     last_scene_update_at = 0.0
 
     try:
-        walkers = spawn_crosswalk_walkers(
-            world, args.pedestrians, args.crosswalk_id, rng
+        walkers = spawn_managed_walkers(
+            world,
+            args.pedestrians,
+            args.crosswalk_id,
+            rng,
+            args.pedestrian_mode,
         )
         vehicles = spawn_vehicles(
             world, args.traffic_manager_port, args.vehicles, rng
@@ -1061,7 +1320,9 @@ def main() -> int:
             walker_commands = []
             for walker in walkers:
                 try:
-                    walker_commands.append(walker.update())
+                    command = walker.update()
+                    if command is not None:
+                        walker_commands.append(command)
                 except RuntimeError:
                     pass
             if walker_commands:
@@ -1088,6 +1349,7 @@ def main() -> int:
                 args.pedestrians,
                 args.crosswalk_id,
                 rng,
+                args.pedestrian_mode,
             )
             pedestrian_rebuild_count += int(rebuilt_walkers)
             telemetry = vehicle_status(vehicles)
@@ -1147,6 +1409,7 @@ def main() -> int:
                 "map": world.get_map().name,
                 "requested_vehicle_count": args.vehicles,
                 "requested_pedestrian_count": args.pedestrians,
+                "pedestrian_mode": args.pedestrian_mode,
                 "pedestrian_rebuild_count": pedestrian_rebuild_count,
                 "relocation_count": relocation_count,
                 "replacement_count": replacement_count,
@@ -1174,10 +1437,9 @@ def main() -> int:
             viewer_server.should_exit = True
         if viewer_thread is not None:
             viewer_thread.join(timeout=10)
-        actor_ids = (
-            [walker.actor.id for walker in walkers]
-            + [vehicle.id for vehicle in vehicles]
-        )
+        for walker in walkers:
+            walker.destroy()
+        actor_ids = [vehicle.id for vehicle in vehicles]
         if camera is not None:
             actor_ids.append(camera.id)
         if actor_ids:

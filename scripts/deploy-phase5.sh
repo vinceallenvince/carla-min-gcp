@@ -19,6 +19,8 @@ gcloud compute scp \
   "${REPO_DIR}/static" \
   "${REPO_DIR}/survey_crosswalks.py" \
   "${REPO_DIR}/survey_crosswalk_views.py" \
+  "${REPO_DIR}/survey_navmesh_crosswalks.py" \
+  "${REPO_DIR}/probe_ai_crosswalk.py" \
   "${REPO_DIR}/verify_scene.py" \
   "${REPO_DIR}/verify_viewer.py" \
   "${VM_NAME}:carla-poc/" \
@@ -44,7 +46,8 @@ sudo docker run --detach \
   --volume="${HOME}/carla-poc/data:/data" \
   carla-poc-driver:0.10.0 \
   --vehicles=20 \
-  --pedestrians=8 \
+  --pedestrians=16 \
+  --pedestrian-mode=ai \
   --http-host=127.0.0.1 \
   --http-port=8080 \
   --camera-width=352 \
@@ -53,11 +56,11 @@ sudo docker run --detach \
   --camera-fov=70 \
   --jpeg-quality=75 \
   --camera-mode=static \
-  --crosswalk-id=8 \
-  --static-camera-x=-80.066 \
-  --static-camera-y=-60.985 \
-  --static-camera-z=9.6 \
+  --crosswalk-id=14 \
+  --static-camera-x=-113.041 \
+  --static-camera-y=21.270 \
+  --static-camera-z=12.0 \
   --static-camera-pitch=-27.242 \
-  --static-camera-yaw=-8.098 \
+  --static-camera-yaw=-7.917 \
   --static-camera-roll=0.0 \
   --output-dir=/data'
