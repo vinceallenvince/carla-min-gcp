@@ -16,6 +16,7 @@ gcloud compute scp \
   "${REPO_DIR}/Dockerfile.driver" \
   "${REPO_DIR}/requirements-viewer.txt" \
   "${REPO_DIR}/simulation.py" \
+  "${REPO_DIR}/hls_adapter.py" \
   "${REPO_DIR}/static" \
   "${REPO_DIR}/survey_crosswalks.py" \
   "${REPO_DIR}/survey_crosswalk_views.py" \
@@ -23,6 +24,7 @@ gcloud compute scp \
   "${REPO_DIR}/probe_ai_crosswalk.py" \
   "${REPO_DIR}/verify_scene.py" \
   "${REPO_DIR}/verify_viewer.py" \
+  "${REPO_DIR}/verify_hls.py" \
   "${VM_NAME}:carla-poc/" \
   --project="${PROJECT_ID}" \
   --zone="${ZONE}"
@@ -48,7 +50,7 @@ sudo docker run --detach \
   --vehicles=20 \
   --pedestrians=16 \
   --pedestrian-mode=ai \
-  --http-host=127.0.0.1 \
+  --http-host=0.0.0.0 \
   --http-port=8080 \
   --camera-width=352 \
   --camera-height=240 \
