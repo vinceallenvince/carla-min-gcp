@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import time
 import urllib.request
 from pathlib import Path
@@ -40,6 +41,10 @@ def get_bytes(url: str) -> bytes:
 
 def get_json(url: str) -> dict[str, Any]:
     return json.loads(get_bytes(url))
+
+
+def minimum_frames_for_sample(minimum_fps: float, sample_seconds: float) -> int:
+    return math.ceil(minimum_fps * sample_seconds)
 
 
 def read_mjpeg_frame(url: str) -> tuple[bytes, str]:
@@ -128,15 +133,20 @@ def main() -> int:
     time.sleep(args.sample_seconds)
     health_after = get_json(f"{args.base_url}/healthz")
     sample_elapsed = time.monotonic() - sample_started
-    if health_after["camera_frame_count"] <= health_before["camera_frame_count"]:
-        raise RuntimeError("Camera frame count did not advance")
-    observed_fps = (
+    frame_count_delta = (
         health_after["camera_frame_count"] - health_before["camera_frame_count"]
-    ) / sample_elapsed
-    if observed_fps < args.minimum_fps:
+    )
+    if frame_count_delta <= 0:
+        raise RuntimeError("Camera frame count did not advance")
+    observed_fps = frame_count_delta / sample_elapsed
+    minimum_frame_count = minimum_frames_for_sample(
+        args.minimum_fps, args.sample_seconds
+    )
+    if frame_count_delta < minimum_frame_count:
         raise RuntimeError(
-            f"Observed camera rate {observed_fps:.2f} fps is below "
-            f"the required {args.minimum_fps:.2f} fps"
+            f"Camera advanced {frame_count_delta} frames in the "
+            f"{args.sample_seconds:.2f}-second sample; {minimum_frame_count} "
+            f"frames are required ({observed_fps:.2f} measured fps)"
         )
     if health_after.get("camera_mode") != args.expected_camera_mode:
         raise RuntimeError(
@@ -181,6 +191,7 @@ def main() -> int:
         "camera_mode": health_after.get("camera_mode"),
         "camera_frame_count_after": health_after["camera_frame_count"],
         "camera_frame_count_before": health_before["camera_frame_count"],
+        "camera_frame_count_delta": frame_count_delta,
         "camera_observed_fps": round(observed_fps, 2),
         "camera_target_fps": health_after.get("camera_target_fps"),
         "crosswalk_id": health_after.get("crosswalk_id"),

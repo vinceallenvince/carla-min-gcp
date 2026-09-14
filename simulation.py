@@ -18,9 +18,17 @@ from typing import Any
 
 import carla
 import uvicorn
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 from PIL import Image as PILImage
+
+from hls_adapter import HLSAdapterSupervisor, HLSConfig
 
 
 ROLE_NAME = "carla-poc-phase5"
@@ -46,6 +54,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="/data", type=Path)
     parser.add_argument("--http-host", default="127.0.0.1")
     parser.add_argument("--http-port", default=8080, type=int)
+    parser.add_argument("--hls-segment-seconds", default=2.0, type=float)
+    parser.add_argument("--hls-list-size", default=4, type=int)
+    parser.add_argument("--hls-delete-threshold", default=1, type=int)
+    parser.add_argument("--hls-restart-delay", default=1.0, type=float)
+    parser.add_argument("--hls-stale-after", default=6.0, type=float)
+    parser.add_argument("--ffmpeg-binary", default="ffmpeg")
     parser.add_argument("--camera-width", default=352, type=int)
     parser.add_argument("--camera-height", default=240, type=int)
     parser.add_argument("--camera-fps", default=20.0, type=float)
@@ -66,6 +80,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("pedestrian count cannot be negative")
     if args.camera_fps <= 0:
         parser.error("camera FPS must be positive")
+    if min(
+        args.hls_segment_seconds,
+        args.hls_list_size,
+        args.hls_delete_threshold,
+        args.hls_restart_delay,
+        args.hls_stale_after,
+    ) <= 0:
+        parser.error("HLS timing and retention settings must be positive")
     if not 1 <= args.camera_fov < 180:
         parser.error("camera FOV must be between 1 and 180 degrees")
     if not 1 <= args.jpeg_quality <= 95:
@@ -1040,6 +1062,10 @@ class CameraRecorder:
             )
             return self.latest_frame, self.latest_jpeg, self._closed
 
+    def current_jpeg(self) -> bytes | None:
+        with self._condition:
+            return self.latest_jpeg
+
     def close(self) -> None:
         with self._condition:
             self._closed = True
@@ -1049,7 +1075,11 @@ class CameraRecorder:
         self._snapshot_thread.join(timeout=10)
 
 
-def create_viewer_app(recorder: CameraRecorder, status_path: Path) -> FastAPI:
+def create_viewer_app(
+    recorder: CameraRecorder,
+    status_path: Path,
+    hls_adapter: HLSAdapterSupervisor,
+) -> FastAPI:
     app = FastAPI(
         title="CARLA on GCP",
         docs_url=None,
@@ -1069,6 +1099,7 @@ def create_viewer_app(recorder: CameraRecorder, status_path: Path) -> FastAPI:
         except (FileNotFoundError, json.JSONDecodeError):
             scene_status = {}
         camera_status = recorder.snapshot()
+        hls_status = hls_adapter.health()
         return JSONResponse(
             {
                 "camera_dropped_frame_count": camera_status[
@@ -1098,8 +1129,41 @@ def create_viewer_app(recorder: CameraRecorder, status_path: Path) -> FastAPI:
                 "pedestrian_mode": scene_status.get("pedestrian_mode"),
                 "state": scene_status.get("state", "starting"),
                 "vehicle_count": scene_status.get("vehicle_count"),
+                **hls_status,
             },
             headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get("/snapshot.jpg")
+    def snapshot() -> Response:
+        jpeg = recorder.current_jpeg()
+        if jpeg is None:
+            raise HTTPException(status_code=503, detail="Camera frame unavailable")
+        return Response(
+            content=jpeg,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get("/live/playlist.m3u8")
+    def hls_playlist() -> FileResponse:
+        if not hls_adapter.playlist_path.is_file():
+            raise HTTPException(status_code=503, detail="HLS playlist unavailable")
+        return FileResponse(
+            hls_adapter.playlist_path,
+            media_type="application/vnd.apple.mpegurl",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get("/live/{segment_name}")
+    def hls_segment(segment_name: str) -> FileResponse:
+        segment_path = hls_adapter.segment_path(segment_name)
+        if segment_path is None:
+            raise HTTPException(status_code=404, detail="HLS segment not found")
+        return FileResponse(
+            segment_path,
+            media_type="video/mp2t",
+            headers={"Cache-Control": "public, max-age=30, immutable"},
         )
 
     @app.get("/stream.mjpg")
@@ -1134,9 +1198,15 @@ def create_viewer_app(recorder: CameraRecorder, status_path: Path) -> FastAPI:
 
 
 def start_viewer(
-    args: argparse.Namespace, recorder: CameraRecorder
+    args: argparse.Namespace,
+    recorder: CameraRecorder,
+    hls_adapter: HLSAdapterSupervisor,
 ) -> tuple[uvicorn.Server, threading.Thread]:
-    app = create_viewer_app(recorder, args.output_dir / "status.json")
+    app = create_viewer_app(
+        recorder,
+        args.output_dir / "status.json",
+        hls_adapter,
+    )
     server = uvicorn.Server(
         uvicorn.Config(
             app,
@@ -1279,6 +1349,21 @@ def main() -> int:
     viewer_server: uvicorn.Server | None = None
     viewer_thread: threading.Thread | None = None
     recorder = CameraRecorder(args.output_dir, args.jpeg_quality, args.camera_fps)
+    hls_adapter = HLSAdapterSupervisor(
+        HLSConfig(
+            input_url=f"http://127.0.0.1:{args.http_port}/stream.mjpg",
+            output_dir=args.output_dir / "hls",
+            width=args.camera_width,
+            height=args.camera_height,
+            fps=args.camera_fps,
+            segment_seconds=args.hls_segment_seconds,
+            list_size=args.hls_list_size,
+            delete_threshold=args.hls_delete_threshold,
+            restart_delay=args.hls_restart_delay,
+            stale_after=args.hls_stale_after,
+            ffmpeg_binary=args.ffmpeg_binary,
+        )
+    )
     started_at = time.time()
     ego_stalled_since: float | None = None
     relocation_count = 0
@@ -1300,7 +1385,8 @@ def main() -> int:
         for vehicle in vehicles:
             configure_traffic_manager_vehicle(traffic_manager, vehicle)
         camera = spawn_camera(world, vehicles[0], recorder, args)
-        viewer_server, viewer_thread = start_viewer(args, recorder)
+        viewer_server, viewer_thread = start_viewer(args, recorder, hls_adapter)
+        hls_adapter.start()
         camera_description = (
             f"static over crosswalk {args.crosswalk_id}"
             if args.camera_mode == "static"
@@ -1316,6 +1402,8 @@ def main() -> int:
         while not stop_event.is_set():
             if viewer_thread is None or not viewer_thread.is_alive():
                 raise RuntimeError("The browser viewer stopped unexpectedly")
+            if not hls_adapter.is_alive():
+                raise RuntimeError("The HLS supervisor stopped unexpectedly")
             snapshot = world.wait_for_tick(10.0)
             walker_commands = []
             for walker in walkers:
@@ -1419,7 +1507,9 @@ def main() -> int:
                 "updated_at_unix": time.time(),
                 "viewer": {
                     "host": args.http_host,
+                    "hls_playlist_path": "/live/playlist.m3u8",
                     "port": args.http_port,
+                    "snapshot_path": "/snapshot.jpg",
                     "stream_path": "/stream.mjpg",
                 },
                 "vehicle_count": len(vehicles),
@@ -1432,6 +1522,7 @@ def main() -> int:
     finally:
         if camera is not None:
             camera.stop()
+        hls_adapter.stop()
         recorder.close()
         if viewer_server is not None:
             viewer_server.should_exit = True

@@ -3,14 +3,14 @@ FROM carlasim/carla:0.10.0
 USER root
 COPY requirements-viewer.txt /tmp/requirements-viewer.txt
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3-pip \
+    && apt-get install -y --no-install-recommends ffmpeg python3-pip \
     && python3 -m pip install --no-cache-dir -r /tmp/requirements-viewer.txt \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -c "import glob, zipfile; wheel = glob.glob('/home/carla/PythonAPI/carla/dist/carla-*.whl')[0]; zipfile.ZipFile(wheel).extractall('/usr/local/lib/python3.10/dist-packages')" \
     && python3 -c "import carla; print('Installed CARLA client', carla.__version__ if hasattr(carla, '__version__') else '0.10.0')"
 
 WORKDIR /app
-COPY --chown=carla:carla simulation.py survey_crosswalks.py survey_crosswalk_views.py survey_navmesh_crosswalks.py probe_ai_crosswalk.py verify_scene.py verify_viewer.py /app/
+COPY --chown=carla:carla simulation.py hls_adapter.py survey_crosswalks.py survey_crosswalk_views.py survey_navmesh_crosswalks.py probe_ai_crosswalk.py verify_scene.py verify_viewer.py verify_hls.py /app/
 COPY --chown=carla:carla static /app/static
 
 EXPOSE 8080

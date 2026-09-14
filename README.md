@@ -1,6 +1,7 @@
 # Minimal CARLA on GCP
 
-This repository provisions the first seven phases of the CARLA proof of concept:
+This repository provisions the first seven phases of the CARLA proof of concept
+and the first phase of its live-camera integration:
 
 1. A `g2-standard-8` Compute Engine VM in `us-east4-a` with one NVIDIA L4.
 2. Host and container GPU verification.
@@ -13,6 +14,8 @@ This repository provisions the first seven phases of the CARLA proof of concept:
    MJPEG stream from VM loopback port 8080.
 7. A persistent SSH tunnel from Mac loopback port 8080 to the VM's loopback-only
    viewer, with an end-to-end local browser and MJPEG verification.
+8. A supervised FFmpeg adapter that converts the MJPEG feed into a bounded,
+   rolling 352×240 HLS stream for XWalk Keyboards.
 
 The project defaults to `xwalk-keyboards-01`, VM `carla-poc`, and zone `us-east4-a`.
 No CARLA ports are exposed through a public firewall rule.
@@ -152,14 +155,17 @@ reconnects its MJPEG image if the stream is interrupted.
 
 ## Browser viewer
 
-The scene container serves:
+The scene container serves on port 8080:
 
-- `http://127.0.0.1:8080/` — browser page
-- `http://127.0.0.1:8080/stream.mjpg` — multipart MJPEG stream
-- `http://127.0.0.1:8080/healthz` — live JSON health
+- `/` — browser page
+- `/stream.mjpg` — multipart MJPEG stream
+- `/healthz` — live JSON health
 
-The service binds only to VM loopback. No firewall rule exposes port 8080. Start
-the SSH tunnel to make the page available only on this Mac:
+The service binds to the VM network interface so XWalk Keyboards can reach it
+through Direct VPC egress. Firewall rules permit TCP 8080 only from the Cloud
+Run subnet and explicitly deny all other sources to that port. CARLA RPC ports
+remain private. The SSH tunnel is still the supported way to view the origin
+from this Mac:
 
 ```bash
 ./scripts/viewer-tunnel.sh start
@@ -180,6 +186,33 @@ Stop the tunnel when it is no longer needed:
 ```bash
 ./scripts/viewer-tunnel.sh stop
 ```
+
+## HLS output
+
+The scene container supervises an FFmpeg child process that reads the MJPEG feed
+over container loopback and writes a four-segment live HLS playlist. Completed
+files are published atomically, and obsolete segments are deleted so the output
+directory stays bounded. If FFmpeg exits, the supervisor reports the failure,
+clears stale HLS artifacts, and starts a fresh encoder without restarting CARLA.
+
+The viewer additionally serves on port 8080:
+
+- `/live/playlist.m3u8` — live HLS playlist
+- `/live/segment-*.ts` — MPEG-TS media segments
+- `/snapshot.jpg` — current 352×240 JPEG
+
+`/healthz` includes HLS readiness, encoder state and PID, restart count, last
+exit/error details, latest-segment age, and playlist/disk segment counts. Run the
+destructive encoder-only recovery check after deployment with:
+
+```bash
+./scripts/verify-phase1-hls.sh
+```
+
+The verifier checks playlist advancement, downloads and decodes every listed
+segment with `ffprobe`, verifies 352×240 dimensions and the JPEG snapshot, then
+terminates only FFmpeg. It must observe the unhealthy state, a new encoder PID,
+continued CARLA camera frames, and a newly advancing playlist.
 
 ## Stop billing
 
