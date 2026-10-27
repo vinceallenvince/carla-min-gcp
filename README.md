@@ -1,5 +1,19 @@
 # Minimal CARLA on GCP
 
+## Status: retired
+
+The proof of concept was retired on 2026-10-27, after XWalk Keyboards dropped its
+CARLA camera (ID 90014). These resources were deleted from `xwalk-keyboards-01`:
+
+- VM `carla-poc` (`us-east4-a`, `g2-standard-8` with one NVIDIA L4) and its
+  100 GB `pd-balanced` boot disk. No snapshot or image was kept.
+- Firewall rules `carla-hls-from-cloud-run` and `carla-hls-deny-other` on network `default`.
+- Cloud Run job `carla-hls-vpc-probe` in `us-central1`.
+
+The scripts below still work as a record of the build. `create-vm.sh`,
+`configure-phase2-vpc.sh` and `verify-phase2-live.sh` recreate the VM, firewall
+rules and probe job if they are ever needed again.
+
 This repository provisions the first seven phases of the CARLA proof of concept
 and the first phase of its live-camera integration:
 
